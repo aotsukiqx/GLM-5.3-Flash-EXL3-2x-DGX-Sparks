@@ -230,7 +230,12 @@ launch_cluster
 
 
 # ---------------------------------------------------------------- test 1 ----
-def test_config_wiring(h, tmp):
+def test_config_wiring():
+    with tempfile.TemporaryDirectory(prefix="tp4raw-") as td:
+        _test_config_wiring(Harness(Path(td)), Path(td))
+
+
+def _test_config_wiring(h, tmp):
     print("1. config wiring: per-rank fallbacks and empty defaults")
     calm_env_tp4(h)
     body = (
@@ -274,7 +279,12 @@ def test_config_wiring(h, tmp):
 
 
 # ---------------------------------------------------------------- test 2 ----
-def test_raw_shortcircuit(h, tmp):
+def test_raw_shortcircuit():
+    with tempfile.TemporaryDirectory(prefix="tp4raw-") as td:
+        _test_raw_shortcircuit(Harness(Path(td)), Path(td))
+
+
+def _test_raw_shortcircuit(h, tmp):
     print("2. raw mode: download/sync are no-ops, download_only fail-closed")
     calm_env_tp4(h)
     raw = make_raw_model(tmp, tag="sc")
@@ -294,7 +304,12 @@ def test_raw_shortcircuit(h, tmp):
 
 
 # ---------------------------------------------------------------- test 3 ----
-def test_preflight_gate(h, tmp):
+def test_preflight_gate():
+    with tempfile.TemporaryDirectory(prefix="tp4raw-") as td:
+        _test_preflight_gate(Harness(Path(td)), Path(td))
+
+
+def _test_preflight_gate(h, tmp):
     print("3. preflight gate: raw test -d, default HF-hub writable, mixed per-repo")
     calm_env_tp4(h)
     # The full preflight dies earlier on this stubbed host (CX7 GID sysfs),
@@ -349,7 +364,12 @@ def test_preflight_gate(h, tmp):
 
 
 # ---------------------------------------------------------------- test 4 ----
-def test_launch_mounts(h, tmp):
+def test_launch_mounts():
+    with tempfile.TemporaryDirectory(prefix="tp4raw-") as td:
+        _test_launch_mounts(Harness(Path(td)), Path(td))
+
+
+def _test_launch_mounts(h, tmp):
     print("4. launch_cluster: raw :ro mounts on head+workers, MODEL_DIR in container")
     calm_env_tp4(h)
     make_chat_template(h)
@@ -385,7 +405,12 @@ def test_launch_mounts(h, tmp):
 
 
 # ---------------------------------------------------------------- test 5 ----
-def test_start_raw_branch(h, tmp):
+def test_start_raw_branch():
+    with tempfile.TemporaryDirectory(prefix="tp4raw-") as td:
+        _test_start_raw_branch(Harness(Path(td)), Path(td))
+
+
+def _test_start_raw_branch(h, tmp):
     print("5. start() resolve step: raw branch validates and pins CTR paths")
     calm_env_tp4(h)
     raw = make_raw_model(tmp, tag="sr")
@@ -460,19 +485,26 @@ def normalize_default_argv(argv, repo: Path, tag: str):
     return out
 
 
-def test_default_byte_identical(h, tmp):
+def test_default_byte_identical():
+    with tempfile.TemporaryDirectory(prefix="tp4raw-") as td:
+        _test_default_byte_identical(Harness(Path(td)), Path(td))
+
+
+def _test_default_byte_identical(h, tmp):
     print("6. default HF-cache mode: docker argv byte-parity with git HEAD")
     calm_env_tp4(h)
     make_chat_template(h)
     hf = tmp / "hf"
     (hf / "hub").mkdir(parents=True, exist_ok=True)
 
-    # Baseline: git HEAD version of the launcher (no raw-mode code). The
-    # head_preload empty-array guard is applied to both texts so the diff
-    # isolates the raw-mode change from that bash-3.2 bugfix.
+    # Baseline: upstream's launcher at the merge — it carries the same sparse-MLA
+    # additions as HEAD but no raw-mode code, so the diff isolates exactly the
+    # raw-mode change. The head_preload empty-array guard is applied to both
+    # texts so the diff also isolates that bash-3.2 bugfix.
     old = tmp / "head-launcher.sh"
-    head_text = subprocess.run(["git", "-C", str(ROOT), "show", "HEAD:start-tp4.sh"],
-                               check=True, capture_output=True, text=True).stdout
+    head_text = subprocess.run(
+        ["git", "-C", str(ROOT), "show", "357fce7:start-tp4.sh"],
+        check=True, capture_output=True, text=True).stdout
     head_text = head_text.replace(
         '"${head_preload[@]}"',
         '${head_preload[@]+"${head_preload[@]}"}')
@@ -511,13 +543,10 @@ def main() -> int:
     tests = [test_config_wiring, test_raw_shortcircuit, test_preflight_gate,
              test_launch_mounts, test_start_raw_branch, test_default_byte_identical]
     for t in tests:
-        with tempfile.TemporaryDirectory(prefix="tp4raw-") as td:
-            tmp = Path(td)
-            h = Harness(tmp)
-            try:
-                t(h, tmp)
-            except Exception as e:  # noqa: BLE001
-                check(False, f"{t.__name__} raised {type(e).__name__}: {e}")
+        try:
+            t()
+        except Exception as e:  # noqa: BLE001
+            check(False, f"{t.__name__} raised {type(e).__name__}: {e}")
     print(f"\n{PASSED} passed, {FAILED} failed")
     return 1 if FAILED else 0
 

@@ -89,6 +89,10 @@ printf '%s\n' "$EXPECTED_SHARDS"
             script, {"GLM53_MODEL_PRESET": "abliterated", "EXPECTED_SHARDS": "1"}
         )
         regular = _run(script, {"GLM53_MODEL_PRESET": "", "EXPECTED_SHARDS": "1"})
+        # ABLIT=1 in the caller environment survives the post-.env clear.
+        opt_in = _run(
+            script, {"GLM53_MODEL_PRESET": "", "EXPECTED_SHARDS": "1", "ABLIT": "1"}
+        )
 
     assert selected.returncode == 0, selected.stderr
     assert selected.stdout.splitlines() == [
@@ -108,7 +112,14 @@ printf '%s\n' "$EXPECTED_SHARDS"
         "wrong/fallback",
         "wrong",
     ]
-    assert regular.stdout.splitlines()[-3:] == ["1", "9123", "1"]
+    # cbaaeea: .env ABLIT is cleared after sourcing; only a caller export
+    # opts in. EXPECTED_SHARDS and PORT still come through from .env/caller.
+    assert regular.stdout.splitlines()[-3:] == ["0", "9123", "1"]
+
+    # ABLIT=1 in the caller environment survives the clear and opts in.
+    assert opt_in.returncode == 0, opt_in.stderr
+    assert opt_in.stdout.splitlines()[-3:] == ["1", "9123", "1"]
+
 
 
 def _make_snapshot(repo: Path, revision: str, shards: int = 120) -> None:

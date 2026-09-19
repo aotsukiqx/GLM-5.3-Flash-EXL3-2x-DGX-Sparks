@@ -1491,7 +1491,7 @@ download_weights() {
 }
 
 download_dflash() {
-    if [ -n "$DFLASH_HOST_DIR" ]; then log "raw host-dir DFlash2 — skipping HF download ($DFLASH_HOST_DIR)"; return 0; fi
+    if [ -n "${DFLASH_HOST_DIR:-}" ]; then log "raw host-dir DFlash2 — skipping HF download (${DFLASH_HOST_DIR:-})"; return 0; fi
      [ "$SPEC_METHOD" = "dflash" ] || return 0
     [ "${SKIP_DOWNLOAD:-0}" = "1" ] && { log "SKIP_DOWNLOAD=1 — skipping DFlash2 download check"; return; }
     local have=0 selected=""
