@@ -354,10 +354,45 @@ WORKER3_TILELANG_CACHE="${WORKER3_TILELANG_CACHE:-$WORKER3_VLLM_CACHE/tilelang}"
 TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/root/.triton/cache}"
 TILELANG_CACHE_DIR="${TILELANG_CACHE_DIR:-/root/.tilelang/cache}"
 
+# Optional raw host-dir weights. Set MODEL_HOST_DIR to a directory on this
+# machine's local disk holding the EXL3 weights (config.json + *.safetensors
+# shards) and DFLASH_HOST_DIR to the DFlash2 drafter dir; vLLM reads them
+# straight off a :ro mount — no HF download, no rsync to workers. Workers
+# default to the head values when their *_HOST_DIR is unset, so identical
+# layouts on all 4 nodes need only the two head variables. Empty (default)
+# keeps the HF-cache download/sync flow byte-for-byte.
+MODEL_HOST_DIR="${MODEL_HOST_DIR:-}"
+DFLASH_HOST_DIR="${DFLASH_HOST_DIR:-}"
+WORKER_MODEL_HOST_DIR="${WORKER_MODEL_HOST_DIR:-$MODEL_HOST_DIR}"
+WORKER2_MODEL_HOST_DIR="${WORKER2_MODEL_HOST_DIR:-$MODEL_HOST_DIR}"
+WORKER3_MODEL_HOST_DIR="${WORKER3_MODEL_HOST_DIR:-$MODEL_HOST_DIR}"
+WORKER_DFLASH_HOST_DIR="${WORKER_DFLASH_HOST_DIR:-$DFLASH_HOST_DIR}"
+WORKER2_DFLASH_HOST_DIR="${WORKER2_DFLASH_HOST_DIR:-$DFLASH_HOST_DIR}"
+WORKER3_DFLASH_HOST_DIR="${WORKER3_DFLASH_HOST_DIR:-$DFLASH_HOST_DIR}"
+
+# Fixed in-container mount targets for raw host-dir mode. Not user config:
+# start() points MODEL_DIR/DFLASH_MODEL_DIR at these in raw mode, so the
+# inner scripts need no changes.
+MODEL_CTR_PATH="/models/glm53-exl3"
+DFLASH_CTR_PATH="/models/glm53-dflash"
+
 LOGDIR="$SCRIPT_DIR/logs"
 HEAD_SCRIPT="$SCRIPT_DIR/.glm53-exl3-tp4-head.inner.sh"
 WORKER_SCRIPT="$SCRIPT_DIR/.glm53-exl3-tp4-worker.inner.sh"
 EXPECTED_SHARDS="${EXPECTED_SHARDS:-120}"
+
+# Opt-in decode accelerators (same knobs as the TP2 start.sh; default off
+# keeps the classic serve). adaptive-k shortens verified draft prefixes by a
+# running accept average; dense-fp8 runs KDA/dense-MLP projections through
+# Marlin FP8. See README "Faster prose decode".
+GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-off}"
+GLM53_ADAPTIVE_K_SET="${GLM53_ADAPTIVE_K_SET:-2,4,7}"
+GLM53_ADAPTIVE_K_ALPHA="${GLM53_ADAPTIVE_K_ALPHA:-0.25}"
+GLM53_ADAPTIVE_K_MARGIN="${GLM53_ADAPTIVE_K_MARGIN:-1.0}"
+GLM53_ADAPTIVE_K_MIN_STEPS="${GLM53_ADAPTIVE_K_MIN_STEPS:-4}"
+GLM53_ADAPTIVE_K_SATURATE="${GLM53_ADAPTIVE_K_SATURATE:-max}"
+GLM53_ADAPTIVE_K_HIST="${GLM53_ADAPTIVE_K_HIST:-200}"
+GLM53_DENSE_FP8="${GLM53_DENSE_FP8:-off}"
 
 # ------------------------------- helpers -----------------------------------
 log()  { printf '\033[1;36m[glm53-exl3-tp4]\033[0m %s\n' "$*"; }
@@ -593,6 +628,20 @@ _tp4_rank_nccl_dir() {
         3) printf '%s' "$WORKER3_NCCL_HOST_DIR" ;;
     esac
 }
+_tp4_rank_model_dir() {
+    case "$1" in
+        1) printf '%s' "$WORKER_MODEL_HOST_DIR" ;;
+        2) printf '%s' "$WORKER2_MODEL_HOST_DIR" ;;
+        3) printf '%s' "$WORKER3_MODEL_HOST_DIR" ;;
+    esac
+}
+_tp4_rank_dflash_dir() {
+    case "$1" in
+        1) printf '%s' "$WORKER_DFLASH_HOST_DIR" ;;
+        2) printf '%s' "$WORKER2_DFLASH_HOST_DIR" ;;
+        3) printf '%s' "$WORKER3_DFLASH_HOST_DIR" ;;
+    esac
+}
 _tp4_first_ib() { printf '%s' "${1%%,*}"; }
 
 worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"; }
@@ -654,6 +703,17 @@ check_port_free() {
         fi
         die "port ${port} is already in use — stop it or rerun with ${envname}=<free-port>"
     fi
+}
+
+# Raw host-dir weights: validate the local (head) copies. Existence on the
+# workers is gated per-rank in preflight; shard count here is informational
+# (EXPECTED_SHARDS still guards the HF-download path only).
+_tp4_check_raw_dir() {
+    local dir="$1" what="$2" n
+    [ -d "$dir" ] || die "raw ${what} host dir not found: $dir"
+    [ -f "$dir/config.json" ] || die "config.json missing in raw ${what} host dir: $dir"
+    n=$(find "$dir" -maxdepth 1 -name '*.safetensors' | wc -l | tr -d ' ')
+    log "raw ${what} dir: ${n} safetensors file(s) in $dir"
 }
 
 trap 'warn "interrupted — containers keep running ('"'"'./start-tp4.sh logs'"'"' to watch, '"'"'./start-tp4.sh stop'"'"' to stop)"; exit 130' INT
@@ -757,13 +817,23 @@ preflight() {
         [ "${avail:-0}" -ge "$need_kb" ] || warn "only $((avail/1024/1024)) GiB free on rank ${r} for a ~164 GiB model"
     done
 
-    # The worker HF cache must be writable by the SSH user before the ~164 GiB
-    # sync starts. A root-owned ~/.cache/huggingface (prior sudo/docker
-    # prepare on the worker) otherwise fails mid-sync with a bare mkdir
-    # permission error. mkdir -p is idempotent and is what sync does anyway.
+    # Raw host-dir mode gates per repo: raw dirs must exist on each worker
+    # (test -d); repos still flowing through HF download/rsync keep the
+    # writable-hub check so a mixed raw-model + HF-dflash setup stays guarded.
+    local r
     for r in 1 2 3; do
-        if ! worker_ssh_n "$r" "mkdir -p '$(_tp4_rank_hf "$r")/hub' && test -w '$(_tp4_rank_hf "$r")/hub'"; then
-            die "rank ${r} cannot write $(_tp4_rank_hf "$r")/hub — fix ownership, e.g. ssh $(_tp4_ssh_target "$r") \"sudo chown -R \$USER: '$(_tp4_rank_hf "$r")'\""
+        if [ -n "$MODEL_HOST_DIR" ]; then
+            worker_ssh_n "$r" "test -d '$(_tp4_rank_model_dir "$r")'" \
+                || die "rank ${r} raw model host dir not found: $(_tp4_rank_model_dir "$r")"
+        fi
+        if [ "$SPEC_METHOD" = "dflash" ] && [ -n "$DFLASH_HOST_DIR" ]; then
+            worker_ssh_n "$r" "test -d '$(_tp4_rank_dflash_dir "$r")'" \
+                || die "rank ${r} raw dflash host dir not found: $(_tp4_rank_dflash_dir "$r")"
+        fi
+        if [ -z "$MODEL_HOST_DIR" ] || { [ "$SPEC_METHOD" = "dflash" ] && [ -z "$DFLASH_HOST_DIR" ]; }; then
+            if ! worker_ssh_n "$r" "mkdir -p '$(_tp4_rank_hf "$r")/hub' && test -w '$(_tp4_rank_hf "$r")/hub'"; then
+                die "rank ${r} cannot write $(_tp4_rank_hf "$r")/hub — fix ownership, e.g. ssh $(_tp4_ssh_target "$r") \"sudo chown -R \$USER: '$(_tp4_rank_hf "$r")'\""
+            fi
         fi
     done
 
@@ -1067,6 +1137,7 @@ hf_download_repo() {
 }
 
 download_weights() {
+    if [ -n "$MODEL_HOST_DIR" ]; then log "raw host-dir weights — skipping HF download ($MODEL_HOST_DIR)"; return 0; fi
     [ "${SKIP_DOWNLOAD:-0}" = "1" ] && { log "SKIP_DOWNLOAD=1 — skipping download check"; return; }
     if [ "${REFRESH_WEIGHTS:-0}" != "1" ] && adopt_complete_weights; then
         return
@@ -1098,6 +1169,7 @@ download_weights() {
 }
 
 download_dflash() {
+    if [ -n "$DFLASH_HOST_DIR" ]; then log "raw host-dir DFlash2 — skipping HF download ($DFLASH_HOST_DIR)"; return 0; fi
     [ "$SPEC_METHOD" = "dflash" ] || return 0
     [ "${SKIP_DOWNLOAD:-0}" = "1" ] && { log "SKIP_DOWNLOAD=1 — skipping DFlash2 download check"; return; }
     local have
@@ -1119,6 +1191,9 @@ download_dflash() {
 
 # Head-only Hub fetch. No docker, no SSH, no worker rsync.
 download_only() {
+    if [ -n "$MODEL_HOST_DIR" ] || [ -n "$DFLASH_HOST_DIR" ]; then
+        die "download subcommand makes no sense in raw host-dir mode — weights are read straight off ${MODEL_HOST_DIR:-$DFLASH_HOST_DIR}"
+    fi
     local have
     resolve_hf_bin || die "no 'hf' / 'huggingface-cli' on PATH and no python huggingface_hub — pip install --user -U 'huggingface_hub[cli]' (or set HF_BIN=/path/to/hf)"
     mkdir -p "$HF_CACHE_DIR"
@@ -1184,15 +1259,21 @@ sync_repo_to_one_worker() {
 
 sync_weights() {
     [ "${SKIP_SYNC:-0}" = "1" ] && { log "SKIP_SYNC=1 — not syncing to workers"; return; }
-    [ -d "$MODEL_PATH" ] || die "weights missing at $MODEL_PATH — run without SKIP_DOWNLOAD first"
     local r
-    for r in 1 2 3; do
-        sync_repo_to_one_worker "$r" "$MODEL_PATH" "$MODEL_CACHE_NAME" "weights"
-        if [ "$SPEC_METHOD" = "dflash" ]; then
-            [ -d "$DFLASH_PATH" ] || die "DFlash2 weights missing at $DFLASH_PATH"
+    if [ -z "$MODEL_HOST_DIR" ]; then
+        [ -d "$MODEL_PATH" ] || die "weights missing at $MODEL_PATH — run without SKIP_DOWNLOAD first"
+        for r in 1 2 3; do
+            sync_repo_to_one_worker "$r" "$MODEL_PATH" "$MODEL_CACHE_NAME" "weights"
+        done
+    else
+        log "raw host-dir weights — skipping worker rsync ($MODEL_HOST_DIR)"
+    fi
+    if [ "$SPEC_METHOD" = "dflash" ] && [ -z "$DFLASH_HOST_DIR" ]; then
+        [ -d "$DFLASH_PATH" ] || die "DFlash2 weights missing at $DFLASH_PATH"
+        for r in 1 2 3; do
             sync_repo_to_one_worker "$r" "$DFLASH_PATH" "$DFLASH_CACHE_NAME" "DFlash2 draft"
-        fi
-    done
+        done
+    fi
     log "all worker weights in sync"
 }
 
@@ -1536,12 +1617,22 @@ TP4_SKIP_OLD_SCP
         fi
     fi
 
+    local -a head_raw_mounts=()
+    if [ -n "$MODEL_HOST_DIR" ]; then
+        head_raw_mounts+=(-v "$MODEL_HOST_DIR:$MODEL_CTR_PATH:ro")
+    fi
+    if [ -n "$DFLASH_HOST_DIR" ]; then
+        head_raw_mounts+=(-v "$DFLASH_HOST_DIR:$DFLASH_CTR_PATH:ro")
+    fi
+
     local serve_env=""
     local v
     for v in SERVED_MODEL_NAME PORT TP NNODES HEAD_IP MASTER_PORT QUANTIZATION \
              MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
              KV_CACHE_DTYPE LOAD_FORMAT PREFIX_MATCH_UNIT MTP_TOKENS SPEC_METHOD DFLASH_TOKENS DFLASH_MODEL_DIR \
              DFLASH_DRAFT_TP \
+             GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
+             GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8 \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED EXL3_FAT_SORTED EXL3_FAT_BATCHED EXL3_FAT_KERNEL MODEL_DIR EXTRA_ARGS \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
@@ -1566,16 +1657,20 @@ TP4_SKIP_OLD_SCP
                 warn "rank ${r}: $nccl_dir/$NCCL_SO_NAME missing — using image NCCL"
             fi
         fi
+        raw_mounts=""
+        [ -n "$MODEL_HOST_DIR" ] && raw_mounts+=" -v '$(_tp4_rank_model_dir "$r"):$MODEL_CTR_PATH:ro'"
+        [ -n "$DFLASH_HOST_DIR" ] && raw_mounts+=" -v '$(_tp4_rank_dflash_dir "$r"):$DFLASH_CTR_PATH:ro'"
         cname="$(_tp4_rank_container "$r")"
         log "starting rank ${r} on $(_tp4_ssh_target "$r") (NCCL if=$(_tp4_rank_cx7_if "$r") hca=$(_tp4_rank_cx7_ib "$r")) ..."
         worker_ssh_n "$r" "docker run -d --name '$cname' \
             --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
             --device /dev/infiniband --cap-add IPC_LOCK \
-            --ulimit memlock=-1 --ulimit stack=67108864 \
+            --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=524288:524288 \
             -v '$(_tp4_rank_hf "$r"):/root/.cache/huggingface' \
             -v '$(_tp4_rank_vllm "$r"):/root/.cache/vllm' \
             -v '$(_tp4_rank_triton "$r"):/root/.triton/cache' \
             -v '$(_tp4_rank_tilelang "$r"):/root/.tilelang/cache' \
+            ${raw_mounts} \
             -v '/tmp/${cname}.sh:/start.sh:ro' \
             -v '/tmp/glm53-chat_template.jinja:${CHAT_TEMPLATE}:ro' \
             -v '/tmp/patch_glm_video_placeholders.py:/opt/glm53/patch_glm_video_placeholders.py:ro' \
@@ -1606,11 +1701,12 @@ TP4_SKIP_OLD_SCP
     docker run -d --name "$CONTAINER_HEAD" \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
-        --ulimit memlock=-1 --ulimit stack=67108864 \
+        --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=524288:524288 \
         -v "$HF_CACHE_DIR:/root/.cache/huggingface" \
         -v "$CACHE_ROOT:/root/.cache/vllm" \
         -v "$TRITON_HOST_CACHE:/root/.triton/cache" \
         -v "$TILELANG_HOST_CACHE:/root/.tilelang/cache" \
+        ${head_raw_mounts[@]+"${head_raw_mounts[@]}"} \
         -v "$HEAD_SCRIPT:/start.sh:ro" \
         -v "$CHAT_TEMPLATE_HOST:$CHAT_TEMPLATE:ro" \
         -v "$VIDEO_PATCH_HOST:/opt/glm53/patch_glm_video_placeholders.py:ro" \
@@ -1625,7 +1721,7 @@ TP4_SKIP_OLD_SCP
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_ablit.py:/opt/glm53/patch_ablit.py:ro" \
-        "${head_preload[@]}" \
+        ${head_preload[@]+"${head_preload[@]}"} \
         "${nccl_common[@]}" \
         -e NCCL_SOCKET_IFNAME="$HEAD_CX7_IF" \
         -e GLOO_SOCKET_IFNAME="$HEAD_CX7_IF" \
@@ -1647,6 +1743,14 @@ TP4_SKIP_OLD_SCP
         -e DFLASH_TOKENS="${DFLASH_TOKENS:-7}" \
         -e DFLASH_MODEL_DIR="${DFLASH_MODEL_DIR:-}" \
         -e DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP:-}" \
+        -e GLM53_ADAPTIVE_K="$GLM53_ADAPTIVE_K" \
+        -e GLM53_ADAPTIVE_K_SET="$GLM53_ADAPTIVE_K_SET" \
+        -e GLM53_ADAPTIVE_K_ALPHA="$GLM53_ADAPTIVE_K_ALPHA" \
+        -e GLM53_ADAPTIVE_K_MARGIN="$GLM53_ADAPTIVE_K_MARGIN" \
+        -e GLM53_ADAPTIVE_K_MIN_STEPS="$GLM53_ADAPTIVE_K_MIN_STEPS" \
+        -e GLM53_ADAPTIVE_K_SATURATE="$GLM53_ADAPTIVE_K_SATURATE" \
+        -e GLM53_ADAPTIVE_K_HIST="$GLM53_ADAPTIVE_K_HIST" \
+        -e GLM53_DENSE_FP8="$GLM53_DENSE_FP8" \
         -e LANGUAGE_MODEL_ONLY="$LANGUAGE_MODEL_ONLY" \
         -e SKIP_MM_PROFILING="$SKIP_MM_PROFILING" \
         -e LIMIT_MM="$LIMIT_MM" \
@@ -1806,10 +1910,21 @@ start() {
     sync_weights
     write_inner_scripts
 
-    MODEL_DIR="$(resolve_model_dir)"
+    MODEL_DIR=""
+    if [ -n "$MODEL_HOST_DIR" ]; then
+        _tp4_check_raw_dir "$MODEL_HOST_DIR" weights
+        MODEL_DIR="$MODEL_CTR_PATH"
+    else
+        MODEL_DIR="$(resolve_model_dir)"
+    fi
     DFLASH_MODEL_DIR=""
     if [ "$SPEC_METHOD" = "dflash" ]; then
-        DFLASH_MODEL_DIR="$(resolve_dflash_dir)"
+        if [ -n "$DFLASH_HOST_DIR" ]; then
+            _tp4_check_raw_dir "$DFLASH_HOST_DIR" "DFlash2"
+            DFLASH_MODEL_DIR="$DFLASH_CTR_PATH"
+        else
+            DFLASH_MODEL_DIR="$(resolve_dflash_dir)"
+        fi
         log "DFlash2 load path (in-container): ${DFLASH_MODEL_DIR}"
     fi
     log "model load path (in-container): ${MODEL_DIR}"

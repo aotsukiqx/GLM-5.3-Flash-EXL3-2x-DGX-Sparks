@@ -452,6 +452,19 @@ WORKER_TILELANG_CACHE="${WORKER_TILELANG_CACHE:-$WORKER_VLLM_CACHE/tilelang}"
 TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/root/.triton/cache}"
 TILELANG_CACHE_DIR="${TILELANG_CACHE_DIR:-/root/.tilelang/cache}"
 
+# Optional raw host-dir weights (same opt-in as start-tp4.sh): MODEL_HOST_DIR
+# points at a local dir with config.json + *.safetensors; vLLM reads them off
+# a :ro mount — no HF download, no rsync. The worker defaults to the head
+# values when its *_HOST_DIR is unset. Empty (default) keeps the HF flow.
+MODEL_HOST_DIR="${MODEL_HOST_DIR:-}"
+DFLASH_HOST_DIR="${DFLASH_HOST_DIR:-}"
+WORKER_MODEL_HOST_DIR="${WORKER_MODEL_HOST_DIR:-$MODEL_HOST_DIR}"
+WORKER_DFLASH_HOST_DIR="${WORKER_DFLASH_HOST_DIR:-$DFLASH_HOST_DIR}"
+
+# Fixed in-container mount targets for raw host-dir mode. Not user config.
+MODEL_CTR_PATH="/models/glm53-exl3"
+DFLASH_CTR_PATH="/models/glm53-dflash"
+
 LOGDIR="$SCRIPT_DIR/logs"
 # TP2 lifecycle lock (helpers below). start/restart take it without waiting;
 # stop waits CLUSTER_LOCK_WAIT seconds and then refuses with exit 1.
@@ -494,6 +507,14 @@ _hf_mount() {
     else
         printf '%s:/root/.cache/huggingface' "$WORKER_CACHE_DIR"
     fi
+}
+
+_check_raw_dir() {
+    local dir="$1" what="$2" n
+    [ -d "$dir" ] || die "raw ${what} host dir not found: $dir"
+    [ -f "$dir/config.json" ] || die "config.json missing in raw ${what} host dir: $dir"
+    n=$(find "$dir" -maxdepth 1 -name '*.safetensors' | wc -l | tr -d ' ')
+    log "raw ${what} dir: ${n} safetensors file(s) in $dir"
 }
 
 # GLM53 numeric config guard (begin)
@@ -1108,7 +1129,16 @@ preflight() {
     mkdir -p "$HF_CACHE_DIR"
     avail=$(df -Pk "$HF_CACHE_DIR" 2>/dev/null | awk 'NR==2{print $4}' || true)
     [ "${avail:-0}" -ge "$need_kb" ] || warn "only $((avail/1024/1024)) GiB free on head for a ~164 GiB model"
-    if [ "${NFS_SHARE:-0}" = "1" ]; then
+    if [ -n "$MODEL_HOST_DIR" ] || [ -n "$DFLASH_HOST_DIR" ]; then
+        if [ -n "$MODEL_HOST_DIR" ]; then
+            worker_ssh "test -d '$WORKER_MODEL_HOST_DIR'" \
+                || die "worker raw model host dir not found: $WORKER_MODEL_HOST_DIR"
+        fi
+        if [ "$SPEC_METHOD" = "dflash" ] && [ -n "$DFLASH_HOST_DIR" ]; then
+            worker_ssh "test -d '$WORKER_DFLASH_HOST_DIR'" \
+                || die "worker raw dflash host dir not found: $WORKER_DFLASH_HOST_DIR"
+        fi
+    elif [ "${NFS_SHARE:-0}" = "1" ]; then
         log "NFS_SHARE=1 — worker reads the head HF cache, no local copy to size for"
     else
         avail=$(worker_ssh "df -Pk '$WORKER_HOME' 2>/dev/null" | awk 'NR==2{print $4}' || true)
@@ -1413,7 +1443,8 @@ hf_download_repo() {
 }
 
 download_weights() {
-    [ "${SKIP_DOWNLOAD:-0}" = "1" ] && { log "SKIP_DOWNLOAD=1 — skipping download check"; return; }
+    if [ -n "$MODEL_HOST_DIR" ]; then log "raw host-dir weights — skipping HF download ($MODEL_HOST_DIR)"; return 0; fi
+     [ "${SKIP_DOWNLOAD:-0}" = "1" ] && { log "SKIP_DOWNLOAD=1 — skipping download check"; return; }
     if [ "${REFRESH_WEIGHTS:-0}" != "1" ] && adopt_complete_weights; then
         return
     fi
@@ -1444,7 +1475,8 @@ download_weights() {
 }
 
 download_dflash() {
-    [ "$SPEC_METHOD" = "dflash" ] || return 0
+    if [ -n "$DFLASH_HOST_DIR" ]; then log "raw host-dir DFlash2 — skipping HF download ($DFLASH_HOST_DIR)"; return 0; fi
+     [ "$SPEC_METHOD" = "dflash" ] || return 0
     [ "${SKIP_DOWNLOAD:-0}" = "1" ] && { log "SKIP_DOWNLOAD=1 — skipping DFlash2 download check"; return; }
     local have=0 selected=""
     if [ -n "${DFLASH_REVISION:-}" ]; then
@@ -1470,8 +1502,11 @@ download_dflash() {
 
 # Head-only Hub fetch. No docker, no SSH, no worker rsync.
 download_only() {
-    local have
-    resolve_hf_bin || die "no 'hf' / 'huggingface-cli' on PATH and no python huggingface_hub — pip install --user -U 'huggingface_hub[cli]' (or set HF_BIN=/path/to/hf)"
+    if [ -n "$MODEL_HOST_DIR" ] || [ -n "$DFLASH_HOST_DIR" ]; then
+        die "download subcommand makes no sense in raw host-dir mode — weights are read straight off ${MODEL_HOST_DIR:-$DFLASH_HOST_DIR}"
+    fi
+     local have
+     resolve_hf_bin || die "no 'hf' / 'huggingface-cli' on PATH and no python huggingface_hub — pip install --user -U 'huggingface_hub[cli]' (or set HF_BIN=/path/to/hf)"
     mkdir -p "$HF_CACHE_DIR"
     local need_kb=$((180 * 1024 * 1024)) avail
     avail=$(df -Pk "$HF_CACHE_DIR" 2>/dev/null | awk 'NR==2{print $4}' || true)
@@ -1551,7 +1586,11 @@ verify_worker_model_snapshot() {
 }
 
 sync_weights() {
-    require_model_snapshot
+    if [ -n "$MODEL_HOST_DIR" ] || [ -n "$DFLASH_HOST_DIR" ]; then
+        log "raw host-dir weights — skipping worker sync"
+        return 0
+    fi
+     require_model_snapshot
     if [ "${SKIP_SYNC:-0}" = "1" ]; then
         verify_worker_model_snapshot
         log "SKIP_SYNC=1 — not syncing to worker"
@@ -2017,6 +2056,13 @@ launch_cluster() {
         worker_nccl+=" -e $quoted_env"
     done
 
+    local raw_mounts=""
+    [ -n "$MODEL_HOST_DIR" ] && raw_mounts+=" -v '$WORKER_MODEL_HOST_DIR:$MODEL_CTR_PATH:ro'"
+    [ -n "$DFLASH_HOST_DIR" ] && raw_mounts+=" -v '$WORKER_DFLASH_HOST_DIR:$DFLASH_CTR_PATH:ro'"
+    local -a head_raw_mounts=()
+    [ -n "$MODEL_HOST_DIR" ] && head_raw_mounts+=(-v "$MODEL_HOST_DIR:$MODEL_CTR_PATH:ro")
+    [ -n "$DFLASH_HOST_DIR" ] && head_raw_mounts+=(-v "$DFLASH_HOST_DIR:$DFLASH_CTR_PATH:ro")
+
     # The worker is headless and serves no API, so do not propagate the API
     # credential into its remote docker command or container environment.
 
@@ -2024,13 +2070,14 @@ launch_cluster() {
     worker_ssh "docker run -d --name '$CONTAINER_WORKER' \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
-        --ulimit memlock=-1 --ulimit stack=67108864 \
+        --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=524288:524288 \
         -v '$(_hf_mount)' \
         -v '$WORKER_VLLM_CACHE:/root/.cache/vllm' \
         -v '$WORKER_TRITON_CACHE:/root/.triton/cache' \
         -v '$WORKER_TILELANG_CACHE:/root/.tilelang/cache' \
         -v '/tmp/${CONTAINER_WORKER}.sh:/start.sh:ro' \
         -v '/tmp/glm53-chat_template.jinja:${CHAT_TEMPLATE}:ro' \
+        ${raw_mounts} \
         -v '/tmp/patch_glm_video_placeholders.py:/opt/glm53/patch_glm_video_placeholders.py:ro' \
         -v '/tmp/patch_suppress_stops_in_reasoning.py:/opt/glm53/patch_suppress_stops_in_reasoning.py:ro' \
         -v '/tmp/patch_scheduler_decode_floor.py:/opt/glm53/patch_scheduler_decode_floor.py:ro' \
@@ -2065,7 +2112,7 @@ launch_cluster() {
     VLLM_API_KEY="$VLLM_API_KEY" docker run -d --name "$CONTAINER_HEAD" \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
-        --ulimit memlock=-1 --ulimit stack=67108864 \
+        --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=524288:524288 \
         -v "$HF_CACHE_DIR:/root/.cache/huggingface" \
         -v "$CACHE_ROOT:/root/.cache/vllm" \
         -v "$TRITON_HOST_CACHE:/root/.triton/cache" \
@@ -2092,7 +2139,8 @@ launch_cluster() {
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_ablit.py:/opt/glm53/patch_ablit.py:ro" \
-        "${head_preload[@]}" \
+        ${head_raw_mounts[@]+"${head_raw_mounts[@]}"} \
+        ${head_preload[@]+"${head_preload[@]}"} \
         "${nccl_common[@]}" \
         -e NCCL_SOCKET_IFNAME="$HEAD_CX7_IF" \
         -e GLOO_SOCKET_IFNAME="$HEAD_CX7_IF" \
@@ -2295,10 +2343,21 @@ start_unlocked() {
     sync_weights
     write_inner_scripts
 
-    MODEL_DIR="$(resolve_model_dir)"
+    MODEL_DIR=""
+    if [ -n "$MODEL_HOST_DIR" ]; then
+        _check_raw_dir "$MODEL_HOST_DIR" weights
+        MODEL_DIR="$MODEL_CTR_PATH"
+    else
+        MODEL_DIR="$(resolve_model_dir)"
+    fi
     DFLASH_MODEL_DIR=""
     if [ "$SPEC_METHOD" = "dflash" ]; then
-        DFLASH_MODEL_DIR="$(resolve_dflash_dir)"
+        if [ -n "$DFLASH_HOST_DIR" ]; then
+            _check_raw_dir "$DFLASH_HOST_DIR" "DFlash2"
+            DFLASH_MODEL_DIR="$DFLASH_CTR_PATH"
+        else
+            DFLASH_MODEL_DIR="$(resolve_dflash_dir)"
+        fi
         log "DFlash2 load path (in-container): ${DFLASH_MODEL_DIR}"
     fi
     log "model load path (in-container): ${MODEL_DIR}"
