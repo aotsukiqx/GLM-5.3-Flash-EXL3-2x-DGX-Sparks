@@ -1155,14 +1155,14 @@ preflight() {
     mkdir -p "$HF_CACHE_DIR"
     avail=$(df -Pk "$HF_CACHE_DIR" 2>/dev/null | awk 'NR==2{print $4}' || true)
     [ "${avail:-0}" -ge "$need_kb" ] || warn "only $((avail/1024/1024)) GiB free on head for a ~164 GiB model"
-    if [ -n "$MODEL_HOST_DIR" ] || [ -n "$DFLASH_HOST_DIR" ]; then
-        if [ -n "$MODEL_HOST_DIR" ]; then
-            worker_ssh "test -d '$WORKER_MODEL_HOST_DIR'" \
-                || die "worker raw model host dir not found: $WORKER_MODEL_HOST_DIR"
+    if [ -n "${MODEL_HOST_DIR:-}" ] || [ -n "${DFLASH_HOST_DIR:-}" ]; then
+        if [ -n "${MODEL_HOST_DIR:-}" ]; then
+            worker_ssh "test -d '${WORKER_MODEL_HOST_DIR:-}'" \
+                || die "worker raw model host dir not found: ${WORKER_MODEL_HOST_DIR:-}"
         fi
-        if [ "$SPEC_METHOD" = "dflash" ] && [ -n "$DFLASH_HOST_DIR" ]; then
-            worker_ssh "test -d '$WORKER_DFLASH_HOST_DIR'" \
-                || die "worker raw dflash host dir not found: $WORKER_DFLASH_HOST_DIR"
+        if [ "${SPEC_METHOD:-}" = "dflash" ] && [ -n "${DFLASH_HOST_DIR:-}" ]; then
+            worker_ssh "test -d '${WORKER_DFLASH_HOST_DIR:-}'" \
+                || die "worker raw dflash host dir not found: ${WORKER_DFLASH_HOST_DIR:-}"
         fi
     elif [ "${NFS_SHARE:-0}" = "1" ]; then
         log "NFS_SHARE=1 — worker reads the head HF cache, no local copy to size for"

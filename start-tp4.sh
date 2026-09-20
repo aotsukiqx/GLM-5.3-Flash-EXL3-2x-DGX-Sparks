@@ -842,15 +842,15 @@ preflight() {
     # writable-hub check so a mixed raw-model + HF-dflash setup stays guarded.
     local r
     for r in 1 2 3; do
-        if [ -n "$MODEL_HOST_DIR" ]; then
+        if [ -n "${MODEL_HOST_DIR:-}" ]; then
             worker_ssh_n "$r" "test -d '$(_tp4_rank_model_dir "$r")'" \
                 || die "rank ${r} raw model host dir not found: $(_tp4_rank_model_dir "$r")"
         fi
-        if [ "$SPEC_METHOD" = "dflash" ] && [ -n "$DFLASH_HOST_DIR" ]; then
+        if [ "${SPEC_METHOD:-}" = "dflash" ] && [ -n "${DFLASH_HOST_DIR:-}" ]; then
             worker_ssh_n "$r" "test -d '$(_tp4_rank_dflash_dir "$r")'" \
                 || die "rank ${r} raw dflash host dir not found: $(_tp4_rank_dflash_dir "$r")"
         fi
-        if [ -z "$MODEL_HOST_DIR" ] || { [ "$SPEC_METHOD" = "dflash" ] && [ -z "$DFLASH_HOST_DIR" ]; }; then
+        if [ -z "${MODEL_HOST_DIR:-}" ] || { [ "${SPEC_METHOD:-}" = "dflash" ] && [ -z "${DFLASH_HOST_DIR:-}" ]; }; then
             if ! worker_ssh_n "$r" "mkdir -p '$(_tp4_rank_hf "$r")/hub' && test -w '$(_tp4_rank_hf "$r")/hub'"; then
                 die "rank ${r} cannot write $(_tp4_rank_hf "$r")/hub — fix ownership, e.g. ssh $(_tp4_ssh_target "$r") \"sudo chown -R \$USER: '$(_tp4_rank_hf "$r")'\""
             fi
