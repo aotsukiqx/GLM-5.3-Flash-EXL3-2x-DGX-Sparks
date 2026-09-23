@@ -497,13 +497,14 @@ def _test_default_byte_identical(h, tmp):
     hf = tmp / "hf"
     (hf / "hub").mkdir(parents=True, exist_ok=True)
 
-    # Baseline: upstream's launcher at the merge — it carries the same sparse-MLA
-    # additions as HEAD but no raw-mode code, so the diff isolates exactly the
-    # raw-mode change. The head_preload empty-array guard is applied to both
-    # texts so the diff also isolates that bash-3.2 bugfix.
+    # Baseline: upstream's launcher at the merge — it carries the same
+    # sparse-MLA / mamba-align / draft-kv-compact additions as HEAD but no
+    # raw-mode code, so the diff isolates exactly the raw-mode change. The
+    # head_preload empty-array guard is applied to both texts so the diff
+    # also isolates that bash-3.2 bugfix.
     old = tmp / "head-launcher.sh"
     head_text = subprocess.run(
-        ["git", "-C", str(ROOT), "show", "357fce7:start-tp4.sh"],
+        ["git", "-C", str(ROOT), "show", "3f2be18:start-tp4.sh"],
         check=True, capture_output=True, text=True).stdout
     head_text = head_text.replace(
         '"${head_preload[@]}"',
