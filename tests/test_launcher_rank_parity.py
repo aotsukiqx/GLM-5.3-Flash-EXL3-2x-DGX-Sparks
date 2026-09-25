@@ -978,18 +978,21 @@ launch_loader() {
                 if launcher == "start-tp3.sh":
                     mounts = dict(argv[i + 1].split(":")[:2][::-1]
                                   for i, arg in enumerate(argv[:-1]) if arg == "-v")
-                    expected_root = str(h.repo / "overlay/tp3")
+                    # SCRIPT_DIR resolves symlinks (cd && pwd); tempfile on
+                    # macOS hands back the logical /var path, so compare the
+                    # physical repo root like part D does.
+                    expected_root = str((h.repo / "overlay/tp3").resolve())
                     if host is None:
                         assert mounts[weight_dest] == expected_root + "/vllm/model_executor/model_loader/weight_utils.py"
                     else:
                         assert mounts[weight_dest] == "/tmp/glm53-tp3/vllm/model_executor/model_loader/weight_utils.py"
-                        assert copies[(host, "/tmp/glm53-tp3")] == expected_root
+                        assert Path(copies[(host, "/tmp/glm53-tp3")]).resolve() == Path(expected_root)
                 else:
-                    expected_patch = str(h.repo / "overlay/patch_loadclone.py")
+                    expected_patch = str((h.repo / "overlay/patch_loadclone.py").resolve())
                     if host is None:
                         assert rank.mounts[patch_dest] == expected_patch
                     else:
-                        assert copies[(host, rank.mounts[patch_dest])] == expected_patch
+                        assert Path(copies[(host, rank.mounts[patch_dest])]).resolve() == Path(expected_patch)
 
 
 def loader_artifacts_fail_before_restart_stop() -> None:
