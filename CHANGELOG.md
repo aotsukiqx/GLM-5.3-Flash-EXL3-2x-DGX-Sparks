@@ -11,6 +11,23 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- Boot correctness canary in `scripts/boot-shape-warmup.sh`
+  (`GLM53_WARMUP_CANARY`, default `1`): the post-ready sweep now keeps the
+  reply bodies and scrapes the DFlash counters. If the bounded temperature-0
+  `c1` arm ("Reply with OK.", thinking off) does not answer OK, or DFlash
+  accepts 0 of at least `GLM53_WARMUP_CANARY_MIN_DRAFTS` (64) drafted tokens,
+  the script exits 3 with `DEGENERATE ENGINE`; `start.sh` / `start-tp3.sh` /
+  `start-tp4.sh` collect logs and attempt to take an engine just judged
+  degenerate off the port before failing without READY. Teardown is
+  best-effort: a failed attempt is reported explicitly, and neither its result
+  nor any lingering reachability changes the fatal verdict. Before this, such
+  a boot (#249 signature: garbage output, ~0 acceptance) showed up only as
+  unbounded warmup arms timing out after 240 s, reported as "uncovered shapes
+  may JIT mid-serve", and went into service. Other warmup failures stay
+  nonfatal. `tests/test_boot_shape_warmup.py` covers degenerate,
+  zero-acceptance and canary-off behavior;
+  `tests/test_warmup_canary_launchers.py` covers all three launcher rc-3 paths
+  and teardown-failure reporting.
 - Auto/lazy safetensors staging (`GLM53_LOAD_CLONE=1`) and optional bounded
   local-shard read-ahead (`GLM53_LOAD_PREFETCH=0`, decimal `0..16`) on TP2/TP3/TP4.
   Preserve InstantTensor selection, rank parity, PR230 safety and compact-draft
@@ -86,6 +103,34 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   in #128 / #159, ported with attribution from the MIT recipe qualified on a 4x
   GB10 kit; it does not fix the underlying race. `start.sh` / `start-tp3.sh`
   untouched. (#223)
+
+- **Cold load on GB10 UMA: boot with a full page cache + 64 KiB mmap staging**
+  (`overlay/patch_cold_load_uma.py`, `tests/test_cold_load_uma.py`,
+  `docs/cold-load-uma.md`). On GB10 `torch.cuda.mem_get_info()` free is host
+  `MemFree`, so a full page cache (after the 164 GiB rsync or a previous serve)
+  made InstantTensor either abort (`buffer_size … exceeds device memory budget`,
+  reproduced) or run with `io_depth` shrunk from 512 to double digits. The patch
+  measures `MemAvailable`, drops clean cache when it can, and pins an explicit
+  budget/buffer. With the cache full stock never reaches `/health` (exit 1 at
+  168 s) while this boots in 230 s streaming 164 GiB in 36 s; with a clean
+  cache both are identical (36 s @ ~4.9 GB/s, `/health` 230 s) — this is a
+  correctness fix at the drive ceiling, not a speedup.
+  On kernels whose page size is not 4 KiB it also stages file-backed safetensors
+  tensors into anonymous memory before H2D (`cuMemcpyHtoDAsync` wedges on
+  file-backed 64 KiB mappings); byte-identical to stock on 4 KiB kernels and
+  discrete GPUs. Launcher: `GLM53_HOST_MEM_HYGIENE=1` (default) drops page cache
+  and waits for `MemAvailable` to clear the `GPU_MEM_UTIL` request
+  on both nodes before `docker run`. Runtime kill switches
+  `GLM53_COLD_LOAD_UMA=0`, `GLM53_COLD_LOAD_STAGE_MMAP=0`, forwarded to both
+  ranks when set.
+- **Boot time 259 s → 122 s on `./start.sh restart`** (`/health` 230 → 99 s from
+  `docker run`): the video-placeholder `.pth` no longer imports vLLM on every
+  interpreter start (container → first log line 100 → 6 s); the NVIDIA JIT
+  cache is persisted next to the Triton cache (DFlash2 graph capture 30 → 0 s);
+  `overlay/patch_skip_cudagraph_profile.py` skips the CUDA-graph memory
+  dry-capture when `CG_ESTIMATE=0` discards it anyway (KV profile 18 → 7 s);
+  kill-first parallel stop and a 1 s `/health` poll. Receipts in
+  `docs/cold-load-uma.md`.
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
   adds two K4/N256 fast kernels (shared / independent gate-up input transform)
@@ -152,6 +197,31 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Fixed
 
+- `start.sh` verifies every shard named by the selected snapshot's index and
+  both sidecars against the worker's dereferenced file sizes before trusting
+  the sync marker. Pinned, non-NFS `SKIP_SYNC=1` verifies the target snapshot
+  without transferring it; unpinned and NFS paths retain their existing
+  behavior. An incomplete/invalid head snapshot fails before transfer;
+  interrupted transfers clear the marker before mutation. DFlash2 repairs a
+  dangling weight link with one dereferenced-file transfer and rechecks the
+  complete snapshot before stamping the marker. This checks file presence and
+  sizes, not content hashes. (#256)
+- Group #280's kpool patcher, test and fixture copies with existing recipe
+  copies, and run its tail-seed patch after slot-map in the same layer.
+  The separate #280 instructions produced a 128-layer image that Docker
+  overlay2 could build but could not instantiate on the target hosts;
+  grouping removes five layers without changing the patch order.
+
+- `overlay/patch_kpool_tail_seed_stride.py`: backport vLLM #57477 so the NVIDIA
+  prefill kpool tail seed addresses the padded indexer stride. Pinned vLLM
+  `487ecf187` still uses a dense 2048 B stride in `_kpool_tail_seed_kernel`.
+  This is separate from `patch_kpool_tail_slotmap.py` (block-table row clamp).
+  An unmarked file counts as already fixed upstream only when every seed
+  launch passes the tail tensor's real strides; a half-fixed file fails the
+  boot. Dependency-gated tests now report as skipped, not passed
+  (`GLM53_REQUIRE_KERNEL_TESTS=1` makes them required). Issue #264.
+- `README.md`: the Context row's KV pool is the measured 1,572,073 tokens at
+  the 850k default (14 GiB reservation, compact draft KV), not "~1M".
 - `start.sh`, `start-tp3.sh`, and `start-tp4.sh`: a GHCR pull could replace a
   local image whose recipe stamp already matched the repo, then launch the
   published image (no locally compiled artifacts; `GLM53_EXL3_MOE_FAST=1`
