@@ -162,7 +162,8 @@ ABLIT=0
 # line) to opt in to a TP3-generated overlay.
 unset EXL3_OVERLAY_HOST
 # Thin-decode FAST and the #182 W8A8 FAT path stay on start.sh (TP=2) only.
-# GLM53_KDA_BF16_LARGE_M (#233) is overlay-side and is valid on TP=3.
+# The TP2 example enables KDA retention; TP3 keeps its own opt-in.
+GLM53_KDA_BF16_LARGE_M=0
 unset GLM53_EXL3_MOE_FAST
 unset GLM53_KDA_FP8_FAT
 # TP=3 overlay wins over the 2× knobs in .env.
@@ -746,6 +747,14 @@ validate_numeric_config() {
         fi
     done
     _glm53_validate_enum GLM53_KDA_BF16_LARGE_M "${GLM53_KDA_BF16_LARGE_M-0}" 0 1 || return
+    if [ "${GLM53_DENSE_EXL3-0}" = "1" ]; then
+        # Geometry, not policy: the dense pack shards shared_experts
+        # (2048 columns) which is not divisible by 3, and the TP=3 64->66
+        # head padding (overlay/tp3/patch_tp3_glm.py) covers only BF16
+        # tensors, not EXL3 trellis. start.sh (TP=2) serves dense EXL3.
+        echo "GLM53_DENSE_EXL3=1 is unsupported on TP=3 — serve it with start.sh (TP=2)" >&2
+        return 2
+    fi
     _glm53_validate_enum HAREM_KDA_FLASHKDA "$HAREM_KDA_FLASHKDA" 0 1 || return
     if [ "$HAREM_KDA_FLASHKDA" = 1 ] && [ ! -f "$FLASHKDA_PATCH_HOST" ]; then
         echo "FlashKDA patch missing: $FLASHKDA_PATCH_HOST" >&2; return 2

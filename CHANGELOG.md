@@ -11,6 +11,26 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- `GLM53_MODEL_PRESET=dense-h3` (TP2, opt-in): the first start builds the
+  H3/6-bpw pair on the head from pinned public inputs and stages it in the HF
+  cache: the TR3 target plus dense EXL3 tensors range-read from
+  `turboderp/GLM-5.3-Flash-exl3@4.05bpw` (`2a30229e`), and the IncoAI BF16
+  DFlash2 draft quantized to 6 bpw with MiaAI-Lab/exllamav3 `63b32f0`. The
+  pack builders move from the #281 branch into `tools/`, and
+  `tools/stage_dense_h3.py` stages both halves under content-derived
+  revisions. `tools/pack_profile.py` validates the pair as for any
+  profile pack. A `restart` refuses before stopping while the pair is
+  unbuilt, and the GPU draft build refuses while the GLM serve runs.
+  `dflash2_exl3_quant.sh` now mounts the whole HF repo for a snapshot input:
+  its relative blob links dangled inside the container. It also hands the
+  packaged draft to the invoking user, not root with mode 0600.
+  `dense_overlay.py` gains `--revision`, writes relative pack links, and
+  reads ranges concurrently (`--jobs`, default 16). The 5.3 GB fetch took
+  66 s instead of 1261 s serially, with byte-identical output. The draft
+  revision and the overlay SHA-256 are pinned; both builds reproduce byte
+  for byte. Newest-snapshot fallbacks for a missing `refs/main` skip the
+  built target.
+
 - Boot correctness canary in `scripts/boot-shape-warmup.sh`
   (`GLM53_WARMUP_CANARY`, default `1`): the post-ready sweep now keeps the
   reply bodies and scrapes the DFlash counters. If the bounded temperature-0
@@ -34,6 +54,15 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   settings. The shard window is not a host-memory limit; GPU loader performance
   and KV-capacity gains are not established for this combined candidate.
   Motivated by [Alexbob0's mmap-load measurements](https://github.com/Alexbob0/glm53-flash-vllm-upstream-sm121/blob/bc3891aed74a1f4ccd679e5205ab9bd2605cf283/README.md).
+- TP2 dense EXL3 target loading (including declared `lm_head`), mixed BF16
+  projection tails, and six-group H3 BF16 prefill retention above 144 rows.
+  Add 6-bpw EXL3 DFlash2 drafts with BF16 context K/V and target-only FP8
+  classification. Packed parts and unsupported TP3 geometry fail closed.
+- Asset-backed `glm53_profile` selection pairs a dense target with an immutable
+  6-bpw draft and H3 settings before restart stops containers. Normal packs
+  retain #281 FP8 defaults; conflicting exports, missing shards, changed draft
+  metadata and unsupported profiles refuse. No new pack URL or weights ship
+  with this change; see README for the publisher metadata/staging contract.
 - `examples/tp2-long-coding.env`: the maintainer's TP=2 long-coding profile
   (262k context, two sequences, 1,024-token prefill batches) with each
   default-off option it enables, its measured benefit, and its cost. Not
