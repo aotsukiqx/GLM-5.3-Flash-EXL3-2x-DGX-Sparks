@@ -228,7 +228,7 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   supported for the tested geometry. CPU real-function metadata/composition
   checks are not GPU state/logit parity or TTFT measurements; GPU qualification
   remains outstanding. Reproduction uses the Dockerfile-pinned source probe
-  described in [README](README.md#reproduce-the-pinned-source-cpu-probe).
+  described in [the reference](docs/REFERENCE.md).
   The four-token Kpool replay floor remains conservative and kernel-unverified;
   coarse-only lookup can lose a whole page within three tokens of a boundary.
 - TP3/TP4 now preserve an explicitly exported `LOAD_FORMAT=` through shared and
@@ -247,6 +247,12 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Fixed
 
+- `start-tp4.sh` forwards `EXL3_FAT_GROUPED` to all four ranks (#286) and
+  defaults it to `1` (E3) with the coupled `EXL3_TEMP_ROWS_FUSED` default (32
+  with E3, 256 with E2), matching `start.sh` and `start-tp3.sh`. Before, the
+  value never reached a TP4 rank, so TP4 silently ran the E2 tier. Measured on
+  4 Sparks (1M ctx): cold prefill +35/+38/+41% at 8K/32K/100K, decode
+  unchanged. `EXL3_FAT_GROUPED=0` in `.env.tp4` restores E2.
 - `start-tp4.sh` honours `GLM53_DEFAULT_REASONING_EFFORT`, matching
   `start.sh` and `start-tp3.sh`. TP=4 ignored it, so clients that sent no
   `reasoning_effort` got the template's `max` fallback. The launcher now
@@ -291,6 +297,10 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   `docker load` on the worker failed with `max depth exceeded` while the
   head built and saved the same image fine; grouping removes five layers
   without changing the patch order. (#301)
+- `tests/test_image_layer_budget.py` fails when the base image's 32 layers
+  plus the Dockerfile's COPY/RUN/ADD steps exceed 123, the largest depth
+  observed to load on a worker, so a PR that would repeat #301 fails on CPU
+  before merge instead of at the worker's `docker load`.
 
 - `overlay/patch_kpool_tail_seed_stride.py`: backport vLLM #57477 so the NVIDIA
   prefill kpool tail seed addresses the padded indexer stride. Pinned vLLM
@@ -350,6 +360,18 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   throughput and 1.18% higher cold long-C2 wall time. No universal decode
   speedup or VRAM reduction is claimed. Default remains off; see README
   for the full matrix, cache-residency limits and source-pinned receipt.
+
+### Fixed
+
+- `overlay/patch_scheduler_decode_floor.py` fair-prefill candidate ranking now
+  honors request `priority` when the server runs `--scheduling-policy
+  priority`: a lower numeric priority wins among eligible prefills, and the
+  existing service-age/round-robin ordering is preserved within a priority
+  tier. Under the default FCFS policy the ranking is byte-for-byte the
+  previous one. Service-time credit, chunk limits and running-decoder
+  protection are unchanged. Installed v5 helpers are migrated in place
+  (fail-closed: unknown or drifted anchors are rejected without a write) and
+  repeated application stays byte-identical.
 
 ## [1.6.0] — 2026-09-17
 
