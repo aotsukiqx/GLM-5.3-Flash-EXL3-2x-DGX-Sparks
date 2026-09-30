@@ -171,6 +171,16 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   dry-capture when `CG_ESTIMATE=0` discards it anyway (KV profile 18 → 7 s);
   kill-first parallel stop and a 1 s `/health` poll. Receipts in
   `docs/cold-load-uma.md`.
+- `start-tp4.sh` forwards adaptive verification length (`GLM53_ADAPTIVE_K` and
+  its six companion knobs) to every rank and extends the DFlash capture-size list
+  the way `start.sh` has since 2026-09-08; the four-node launcher previously
+  ignored the knobs silently. TP4 now requires its own opt-in (caller or
+  `.env.tp4`), preserves caller setness for all seven knobs, validates enabled
+  settings before host actions, and reports the effective mode source.
+  Capture generation runs only on start/restart after validation; disabled mode
+  skips both the generator and rank patch. Space/equals capture overrides win.
+  CPU tests compare both launcher generators with runtime query lengths; TP4
+  cluster performance measurement remains separate.
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
   adds two K4/N256 fast kernels (shared / independent gate-up input transform)
@@ -237,6 +247,29 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Fixed
 
+- `start-tp4.sh` honours `GLM53_DEFAULT_REASONING_EFFORT`, matching
+  `start.sh` and `start-tp3.sh`. TP=4 ignored it, so clients that sent no
+  `reasoning_effort` got the template's `max` fallback. The launcher now
+  declares it (empty default, so nothing changes until an operator sets
+  it), accepts only `low|high|max`, passes
+  `--default-chat-template-kwargs` on every rank, and forwards the value to
+  all four containers. `tests/test_default_reasoning_effort_tp4.sh` runs
+  the guard and each rank's argument construction; no TP=4 GPU boot was
+  run. On both `start-tp3.sh` and `start-tp4.sh`, a caller export
+  (`GLM53_DEFAULT_REASONING_EFFORT=low ./start-tp4.sh`) now wins over
+  `.env` and `.env.tpX`, setness-aware as on `start.sh`; before, the
+  `.env.example` line silently replaced it.
+- `start-tp3.sh` honours `GLM53_DEFAULT_REASONING_EFFORT`, a knob only
+  `start.sh` (TP=2) declared, guarded and forwarded. A TP3 seat ignored it
+  entirely, so a value set in the shared `.env` reached neither rank and
+  every client that sent no `reasoning_effort` fell through to
+  `files/chat_template.jinja`, which resolves an absent effort to `max`
+  rather than the intended `high`. The TP3 launcher now carries the
+  declaration (empty default, so no seat changes behaviour until an
+  operator opts in), the `low|high|max` guard, and
+  `--default-chat-template-kwargs` in both inner scripts, and the knob is
+  forwarded through the shared `serve_env` loop to worker ranks 1 and 2
+  and to the head's own `-e` list.
 - `start.sh` verifies every shard named by the selected snapshot's index and
   both sidecars against the worker's dereferenced file sizes before trusting
   the sync marker. Pinned, non-NFS `SKIP_SYNC=1` verifies the target snapshot
@@ -251,6 +284,13 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   The separate #280 instructions produced a 128-layer image that Docker
   overlay2 could build but could not instantiate on the target hosts;
   grouping removes five layers without changing the patch order.
+- Fold the `patch_dflash2_exl3` (#289) and indexer warmup-range (#203) COPY
+  and RUN steps into the existing dflash2/indexer layers. The five separate
+  instructions added since the kpool grouping produced a 126-layer image —
+  over overlay2's practical ~125-layer mount budget (moby/moby#46740) — so
+  `docker load` on the worker failed with `max depth exceeded` while the
+  head built and saved the same image fine; grouping removes five layers
+  without changing the patch order. (#301)
 
 - `overlay/patch_kpool_tail_seed_stride.py`: backport vLLM #57477 so the NVIDIA
   prefill kpool tail seed addresses the padded indexer stride. Pinned vLLM
