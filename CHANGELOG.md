@@ -247,6 +247,40 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Fixed
 
+- Fair-prefill scheduler integration (#283): `overlay/patch_scheduler_decode_floor.py`
+  moves to decode-floor **v7**, combining the three scheduler directions of
+  #246 (@beastllama), #221 (@surlebeat) and #180 (@krunkosaurus) in one patcher.
+  - A selected WAITING request that vLLM refuses KV allocation no longer stalls
+    a runnable prefill. It keeps being retried and recovers once
+    memory frees (#246).
+  - Explicit request priorities still rank fair-prefill candidates under
+    `--scheduling-policy priority`. FCFS is unchanged (#221).
+  - Installer migration follows #180's fail-closed contract. Pristine, v1, v2,
+    v5 and v5+priority (the #221 layout on `main` until now) installations
+    migrate to the same bytes as a fresh v7 install, and a re-apply is a
+    verified no-op. v3/v4 and unknown version markers, drifted, duplicated,
+    marker-only and unmarked helpers, and a duplicate policy wrapper are
+    refused without writing.
+  - `overlay/patch_mamba_align_chunking.py` accepts decode-floor v7 as well
+    as v5.
+  - #180's concurrency canary (`tests/check_concurrent_agents.py`) and its CPU
+    progress regressions (`tests/test_prefill_concurrency.py`) land with it.
+
+  Qualified live on a TP2 pair with a pre-registered baseline → candidate →
+  baseline run (installed scheduler `97c90a18…`, 2026-09-30):
+  - PASS: KV-blocked admission progress, the #180 contention canary (5/5 per
+    arm), TheGrill routine prefill, and the CPU migration matrix.
+  - Inconclusive, because the two baseline runs differ from each other by more
+    than the frozen tolerance: decode, concurrency and mixed TheGrill cells,
+    and temperature-0 output identity. No TheGrill gate regressed.
+  - Known limitation under `--scheduling-policy priority`: a short
+    high-priority prompt can wait about 85 s behind a larger KV-blocked
+    request of the same priority. This is tracked separately.
+  - `start-tp3.sh` and `start-tp4.sh` load the same two overlays, but only TP2
+    was qualified live.
+  - The proposed TP=2 `CHUNK=0` default is **not** part of this change;
+    launcher defaults are unchanged.
+
 - `start-tp4.sh` forwards `EXL3_FAT_GROUPED` to all four ranks (#286) and
   defaults it to `1` (E3) with the coupled `EXL3_TEMP_ROWS_FUSED` default (32
   with E3, 256 with E2), matching `start.sh` and `start-tp3.sh`. Before, the

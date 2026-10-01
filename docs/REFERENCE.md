@@ -854,7 +854,7 @@ uses the resolved scheduler LCM for shared checkpoints, not the drafter's
 smaller block, and preserves smaller Mamba private-state boundaries. EAGLE
 back-off applies only when a participating non-SWA group needs it. Alignment
 capacity is bounded by the actual grant so positive sub-block grants progress.
-The launchers apply the chunking overlay after decode-floor v5.
+The launchers apply the chunking overlay after decode-floor (v5 or v7).
 
 The GPU receipts below qualify the retained PR238 implementation. They do
 not automatically qualify the combined loader and fine-grained APC changes.
@@ -868,7 +868,7 @@ one superseded state per concurrent batch. `patch_mamba_align_chunking.py`
 uses the Mamba group's actual block for checkpoint alignment, not the
 drafter's smaller block, and applies EAGLE back-off only when the full-attention
 group needs it. Sub-block token caps still make progress. The launchers apply
-the chunking overlay after decode-floor v5.
+the chunking overlay after decode-floor (v5 or v7).
 
 **Installer compatibility.** The public InstantTensor image carries a legacy
 `glm53-hybrid-apc` coordinator without the current v3 verification form.
@@ -2001,8 +2001,8 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `tests/test_draft_kv_compact.py` | CPU geometry/alignment checks and pinned-source allocator, backend rejection, idempotence, two-file preflight, and prefix-cache lookup (coordinator + managers) tests |
 | `overlay/patch_glm_video_placeholders.py` | align video timestamp blocks to encoder `grid_t` |
 | `overlay/patch_suppress_stops_in_reasoning.py` | fail-closed detokenizer guard: client `stop` dormant until `</think>` |
-| `overlay/patch_scheduler_decode_floor.py` | skip / cap / off / `fair` mixed-prefill; v5 fixed-cost step fit + largest step-fitting chunk + bounded contention credit, decode first; versioned installer |
-| `tests/test_scheduler_decode_floor.py` | v5 migration from v1/v2/v3/v4; cost fit, ladder climb-back, prompt probe, async accounting, bounded credit, alignment and actual scheduler budget regressions |
+| `overlay/patch_scheduler_decode_floor.py` | skip / cap / off / `fair` mixed-prefill; v7 (#283): v5 fixed-cost step fit + largest step-fitting chunk + bounded contention credit, decode first, plus KV-blocked admission progress (#246) and priority tiers (#221); authenticated installer migration (#180) |
+| `tests/test_scheduler_decode_floor.py` | v7 migration from pristine/v1/v2/v5/v5+priority, refusal of v3/v4 and drifted installs; cost fit, ladder climb-back, prompt probe, async accounting, bounded credit, alignment and actual scheduler budget regressions |
 | `overlay/patch_xgrammar_termination.py` | source-exact vLLM #52805/#53046 backports; stop at termination and validate post-reasoning speculative drafts before FSM advance |
 | `tests/test_xgrammar_termination.py` | exact two-file patch, idempotence, cross-file fail-closed drift, termination/rollback/reset and post-reasoning draft behavior, launcher wiring |
 | `overlay/patch_cache_reset.py` | mount only the upstream cache-reset dev router (`/reset_prefix_cache` et al., #31) when `GLM53_EXPOSE_CACHE_RESET=1`; runtime-mounted by `start.sh` (`CACHE_RESET_PATCH_HOST`) |
@@ -2128,7 +2128,7 @@ then-unmerged overlay stack per-group retention + fine-grained hits + gate v2
 main carries per-KV-cache-group retention via merged #130, where an empty
 `GLM53_APC_RETENTION_INTERVAL_SWA` inherits the global retention interval instead of
 applying #83's automatic rule. #84's overlay patch and the #80 gate-v2 knobs are not
-in main. Current TP=2 main defaults to `GLM53_MIXED_PREFILL_CHUNK=fair` (v5);
+in main. Current TP=2 main defaults to `GLM53_MIXED_PREFILL_CHUNK=fair` (decode-floor v7);
 the historical gate-v2 measurements below do not qualify that policy.
 
 | ctx 50K per lane (distinct prefixes, verified warm) | ×1 | ×2 | ×4 | ×8 | ×16 |

@@ -9,7 +9,8 @@ Only participating non-drafter EAGLE groups require checkpoint backoff.
 The decode-floor overlay owns per-request caps; this overlay owns alignment,
 positive-grant progress and checkpoint backoff. Their anchors do not overlap,
 so either application order is supported. Decode-floor versions before v5 are
-rejected because they do not preserve per-request alignment caps.
+rejected because they do not preserve per-request alignment caps; v5 and
+v7 (#283) are accepted.
 
 Pristine sources and exact retained v1 installations migrate atomically.
 Partial or drifted installations fail before writing.
@@ -31,6 +32,8 @@ MARK = "# [glm53-mamba-align-chunking-v2]"
 LEGACY_MARK = "# [glm53-mamba-align-chunking-v1]"
 DECODE_FLOOR_MARK = "# [glm53-decode-floor"
 DECODE_FLOOR_V5 = "# [glm53-decode-floor:v5]"
+# v7 (#283) keeps v5's per-request alignment-cap hooks byte-identical apart from the marker.
+DECODE_FLOOR_V7 = "# [glm53-decode-floor:v7]"
 
 IMPORT_OLD = """from vllm.v1.kv_cache_interface import KVCacheConfig
 """
@@ -167,7 +170,7 @@ def main() -> int:
     if not P.is_file():
         raise SystemExit(f"missing {P}")
     original = text = P.read_text()
-    if DECODE_FLOOR_MARK in text and DECODE_FLOOR_V5 not in text:
+    if DECODE_FLOOR_MARK in text and DECODE_FLOOR_V5 not in text and DECODE_FLOOR_V7 not in text:
         raise SystemExit(
             f"{P}: patch_scheduler_decode_floor.py older than v5 present; its "
             "per-request cap is not applied to the Mamba alignment"

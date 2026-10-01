@@ -134,10 +134,17 @@ def part_a(src: Path) -> None:
     if MARK not in original:
         with tempfile.TemporaryDirectory() as tmp:
             old = Path(tmp) / "scheduler.py"
-            unsupported = original.replace("# [glm53-decode-floor:v5]", "# [glm53-decode-floor:v4]")
+            # The decode-floor overlay in the source is v5 or v7 (#283); downgrade whichever is present.
+            unsupported = original.replace("# [glm53-decode-floor:v5]", "# [glm53-decode-floor:v4]").replace(
+                "# [glm53-decode-floor:v7]", "# [glm53-decode-floor:v4]")
             old.write_text(unsupported)
             r3 = apply(old)
             check(r3.returncode != 0 and old.read_text() == unsupported, "A4 an older decode-floor version is rejected without writing")
+            if "# [glm53-decode-floor:v7]" in original:
+                v7 = Path(tmp) / "scheduler-v7.py"
+                v7.write_text(original)
+                r4 = apply(v7)
+                check(r4.returncode == 0 and MARK in v7.read_text(), "A5 a decode-floor v7 (#283) source is accepted")
     else:
         print("  note: source already carries this overlay; A4 requires an unpatched scheduler")
     patch = runpy.run_path(str(PATCH))

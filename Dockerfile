@@ -485,7 +485,7 @@ COPY tests/test_indexer_workspace.py tests/test_indexer_warmup_range.py /opt/glm
 COPY overlay/patch_tool_choice_none.py /opt/glm53/patch_tool_choice_none.py
 COPY overlay/patch_loadclone.py /opt/glm53/patch_loadclone.py
 COPY tests/test_loadclone.py /opt/glm53/test_loadclone.py
-COPY tests/fixtures/loadclone_weight_utils.py.txt tests/fixtures/kpool_tail_seed_kernel-487ecf187.py.txt tests/fixtures/kpool_tail_seed_kernel-db1bfdd.py.txt /opt/glm53/fixtures/
+COPY tests/fixtures/loadclone_weight_utils.py.txt tests/fixtures/kpool_tail_seed_kernel-487ecf187.py.txt tests/fixtures/kpool_tail_seed_kernel-db1bfdd.py.txt tests/fixtures/legacy_scheduler_helpers.py /opt/glm53/fixtures/
 COPY tests/test_tool_choice_none.py /opt/glm53/test_tool_choice_none.py
 COPY overlay/ablit_runtime.py /opt/glm53/ablit_runtime.py
 COPY overlay/patch_ablit.py /opt/glm53/patch_ablit.py
